@@ -1,6 +1,20 @@
 #include <Windows.h>
 #include <string>
+#include <cstdarg>
+#include "MinHook.h"
+#include <shellapi.h>
+#include <vector>
+#include "BohrdomAPI.h"
 
+void Log(const char* fmt, ...) {
+	va_list args;
+	va_start(args, fmt);
+
+	vprintf(fmt, args);
+	printf("\n");
+
+	va_end(args);
+}
 #pragma region Proxy
 struct SDL2_mixer_dll {
 	HMODULE dll;
@@ -232,28 +246,123 @@ void setupFunctions() {
 }
 #pragma endregion
 
+typedef void (*SDL_RenderPresent_t)(void*);
+SDL_RenderPresent_t Original_SDL_RenderPresent = nullptr;
+
+typedef int (*SDL_SetRenderDrawColor_t)(void*, uint8_t, uint8_t, uint8_t, uint8_t);
+typedef int (*SDL_RenderFillRect_t)(void*, const void*);
+
+SDL_SetRenderDrawColor_t pSDL_SetRenderDrawColor = nullptr;
+SDL_RenderFillRect_t pSDL_RenderFillRect = nullptr;
+
+
+bool g_showButton = false;
+std::vector<RenderCallback> g_renderCallbacks;
+std::vector<ClickCallback> g_clickCallbacks;
+
+extern "C" {
+	__declspec(dllexport) void RegisterRenderCallback(RenderCallback cb) {
+		g_renderCallbacks.push_back(cb);
+	}
+	__declspec(dllexport) void RegisterClickCallback(ClickCallback cb) {
+		g_clickCallbacks.push_back(cb);
+	}
+}
+
+typedef int (*SDL_PollEvent_t)(void*);
+SDL_PollEvent_t Original_SDL_PollEvent = nullptr;
+
+int Hooked_SDL_PollEvent(void* event) {
+	int result = Original_SDL_PollEvent(event);
+	if (result && event) {
+		uint32_t type = *(uint32_t*)event;
+		if (type == 0x401) {
+			int x = *(int*)((char*)event + 20);
+			int y = *(int*)((char*)event + 24);
+			for (auto& cb : g_clickCallbacks) cb(x, y);
+		}
+	}
+	return result;
+}
+
+void Hooked_SDL_RenderPresent(void* renderer) {
+	for (auto& cb : g_renderCallbacks) cb(renderer);
+	Original_SDL_RenderPresent(renderer);
+}
+
+DWORD WINAPI InputThread(LPVOID) {
+	while (true) {
+		if (GetAsyncKeyState(VK_F1) & 0x8000) {
+			g_showButton = !g_showButton;
+			Sleep(300);
+		}
+		Sleep(10);
+	}
+}
+
+void SetupHooks() {
+	MH_Initialize();
+	HMODULE sdl = GetModuleHandleA("SDL2.dll");
+	pSDL_SetRenderDrawColor = (SDL_SetRenderDrawColor_t)GetProcAddress(sdl, "SDL_SetRenderDrawColor");
+	pSDL_RenderFillRect = (SDL_RenderFillRect_t)GetProcAddress(sdl, "SDL_RenderFillRect");
+
+	void* target = GetProcAddress(sdl, "SDL_RenderPresent");
+	MH_CreateHook(target, &Hooked_SDL_RenderPresent, (void**)&Original_SDL_RenderPresent);
+	MH_EnableHook(target);
+
+	void* pollTarget = GetProcAddress(sdl, "SDL_PollEvent");
+	MH_CreateHook(pollTarget, &Hooked_SDL_PollEvent, (void**)&Original_SDL_PollEvent);
+	MH_EnableHook(pollTarget);
+
+	Log("Hooks installed.");
+}
+
 void LoadMods(std::string modsPath) {
 	WIN32_FIND_DATAA findData;
 	HANDLE hFind = FindFirstFileA((modsPath + "*.dll").c_str(), &findData);
-	if (hFind == INVALID_HANDLE_VALUE) return;
+	if (hFind == INVALID_HANDLE_VALUE) {
+		Log("No mods found at: %s", modsPath.c_str());
+		return;
+	}
 	do {
 		std::string modPath = modsPath + findData.cFileName;
-		LoadLibraryA(modPath.c_str());
+		Log("Loading mod: %s", modPath.c_str());
+		HMODULE mod = LoadLibraryA(modPath.c_str());
+		if (!mod) Log("FAILED to load: %s (err %lu)", modPath.c_str(), GetLastError());
+		else Log("Loaded: %s", modPath.c_str());
 	} while (FindNextFileA(hFind, &findData));
 	FindClose(hFind);
+}
+
+DWORD WINAPI HookThread(LPVOID) {
+	Sleep(2000);
+	SetupHooks();
+	return 0;
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
 	switch (ul_reason_for_call) {
 	case DLL_PROCESS_ATTACH: {
+		AllocConsole();
+		freopen("CONOUT$", "w", stdout);
+		freopen("CONOUT$", "w", stderr);
+		printf("BohrdomLoader debug console\n");
+
 		char exePath[MAX_PATH];
 		GetModuleFileNameA(NULL, exePath, MAX_PATH);
 		std::string gamePath(exePath);
 		gamePath = gamePath.substr(0, gamePath.find_last_of("\\/"));
 
 		SDL2_mixer.dll = LoadLibraryA((gamePath + "\\SDL2_mixer_original.dll").c_str());
+		if (!SDL2_mixer.dll) {
+			Log("FAILED to load SDL2_mixer_original.dll (err %lu)", GetLastError());
+			return 0;
+		}
+		Log("Loaded original SDL2_mixer");
 		setupFunctions();
 		LoadMods(gamePath + "\\mods\\");
+		CreateThread(NULL, 0, HookThread, NULL, 0, NULL);
+		CreateThread(NULL, 0, InputThread, NULL, 0, NULL);
 		break;
 	}
 	case DLL_PROCESS_DETACH:
