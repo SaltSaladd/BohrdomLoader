@@ -29,6 +29,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     return TRUE;
 }
 ```
+You need to include `BohrdomAPI.h`. You can call `RegisterRenderCallback` and `RegisterClickCallback` to hook into the game. You can view a POC mod [here](https://github.com/SaltSaladd/BohrdomLoader/tree/main/HelloWorld).
 
 Build as x86 DLL and drop into the `mods` folder.
 
