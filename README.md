@@ -1,6 +1,9 @@
 # BohrdomLoader
 
 A mod loader for Bohrdom that automatically loads mods on startup.
+
+BohrdomLoader is unfinished and probably will be forever.
+
 ## Installation
 
 1. Download `BohrdomLoader.zip` from the latest release
